@@ -6,7 +6,11 @@ Triages new captures into:
 - Job Search entries (/api/bot/jobs)
 - Bills & Spend entries (/api/bot/bills)
 - Actionable Follow-ups (/api/bot/followups)
-- Permanent Notes (/api/bot/notes) and Index entities (/api/bot/index)
+- Permanent Notes (/api/bot/notes) for confirmed actionable items ONLY.
+
+Safeguard:
+Never files promotional emails, marketing blasts, newsletters, or generic ads as permanent notes.
+Archived/ignored captures are updated to status: archived without filing notes.
 """
 
 from __future__ import annotations
@@ -28,11 +32,24 @@ KNOWN_COMPANIES = [
     'Nutanix', 'Dragonfly AI', 'Pluto TV', 'SAFE Credit Union', 'Capital One'
 ]
 
+# Strict discard patterns for triage
+RE_PROMO_DISCARD = re.compile(
+    r'\b(sale|discount|deal|deals|coupon|promo|promotions|pre-order|starts now|'
+    r'black friday|cyber monday|buy one|bogo|clearance|off your next|free shipping|'
+    r'newsletter|daily digest|weekly digest|the post most|morning brew|substack|'
+    r'jobs matching your profile|jobs you may be interested|new jobs alert|daily job alert)\b',
+    re.I
+)
+
 
 def extract_job(capture: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     combined = f"{capture.get('title', '')} {capture.get('why', '')} {capture.get('raw', '')}"
     
-    if not re.search(r'\b(interview|recruiting|recruiter|candidate|job|position|hiring|offer|application|screening)\b', combined, re.I):
+    # Reject promotional digests and automated job boards
+    if RE_PROMO_DISCARD.search(combined):
+        return None
+
+    if not re.search(r'\b(interview|invitation to interview|screening call|technical screen|technical panel|onsite|recruiter reached out|recruiting coordinator|job offer|offer letter)\b', combined, re.I):
         return None
 
     # Detect company
@@ -77,7 +94,11 @@ def extract_job(capture: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def extract_bill(capture: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     combined = f"{capture.get('title', '')} {capture.get('why', '')} {capture.get('raw', '')}"
     
-    if not re.search(r'\b(bill|invoice|statement|due date|payment due|autopay|automatic payment|receipt|escrow|renewal)\b', combined, re.I):
+    # Reject store promo claiming bill/sale
+    if re.search(r'\b(sale|discount|coupon|buy one|bogo|clearance)\b', combined, re.I):
+        return None
+
+    if not re.search(r'\b(bill due|invoice|payment due|statement is ready|autopay scheduled|automatic payment scheduled|property tax|utility bill|billing statement|past due)\b', combined, re.I):
         return None
 
     # Parse payee
@@ -95,6 +116,10 @@ def extract_bill(capture: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             amount_due = float(m_amt.group(1).replace(',', ''))
         except ValueError:
             amount_due = 0.0
+
+    # If no amount could be extracted, do not treat as actionable bill entry
+    if amount_due <= 0.0:
+        return None
 
     # Parse autopay
     autopay = 'unknown'
@@ -120,7 +145,11 @@ def extract_bill(capture: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def extract_followup(capture: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     combined = f"{capture.get('title', '')} {capture.get('why', '')} {capture.get('raw', '')}"
     
-    if not re.search(r'\b(deadline|action required|urgent|please reply|time-sensitive|reminder|asap|review and sign|rsvp|check-in)\b', combined, re.I):
+    # Reject marketing digests and newsletters
+    if RE_PROMO_DISCARD.search(combined) or re.search(r'\b(unsubscribe|email preferences|view in browser)\b', combined, re.I):
+        return None
+
+    if not re.search(r'\b(action required|action needed|please reply|please respond|response required|time-sensitive|rsvp requested|confirm your attendance|review and sign|signature requested|document awaiting signature|unauthorized login|suspicious sign-in)\b', combined, re.I):
         return None
 
     title = capture.get('title', 'Action needed')
@@ -178,6 +207,7 @@ def main():
     filed_bills = 0
     filed_followups = 0
     filed_notes = 0
+    archived_non_actionables = 0
 
     for c in new_captures:
         cid = c.get('id')
@@ -205,24 +235,32 @@ def main():
                 run_brain_cmd('POST', '/api/bot/followups', fu_data, role='librarian')
             filed_followups += 1
 
-        # Always file a permanent note
-        note_data = {
-            'title': title,
-            'body': f"{why}\n\nSource: {c.get('source_url', 'email')}\n\n{c.get('raw', '')}",
-            'tags': ['inbox', 'filed'],
-            'owner': 'librarian',
-            'stage': 'filed',
-            'status': 'active'
-        }
-        if not args.dry_run:
-            run_brain_cmd('POST', '/api/bot/notes', note_data, role='librarian')
-            # Mark capture filed
-            run_brain_cmd('PATCH', f'/api/bot/captures/{cid}', {'status': 'filed'}, role='librarian')
-        filed_notes += 1
+        # Only file a permanent note if an actionable entity was confirmed
+        is_actionable = (job_data is not None) or (bill_data is not None and bill_data['amount_due'] > 0) or (fu_data is not None)
+
+        if is_actionable:
+            note_tag = 'job' if job_data else ('bill' if bill_data else 'followup')
+            note_data = {
+                'title': title,
+                'body': f"{why}\n\nSource: {c.get('source_url', 'email')}\n\n{c.get('raw', '')}",
+                'tags': ['inbox', 'filed', note_tag],
+                'owner': 'librarian',
+                'stage': 'filed',
+                'status': 'active'
+            }
+            if not args.dry_run:
+                run_brain_cmd('POST', '/api/bot/notes', note_data, role='librarian')
+                run_brain_cmd('PATCH', f'/api/bot/captures/{cid}', {'status': 'filed'}, role='librarian')
+            filed_notes += 1
+        else:
+            # Capture is not an actionable job/bill/followup -> archive it, DO NOT file note
+            archived_non_actionables += 1
+            if not args.dry_run:
+                run_brain_cmd('PATCH', f'/api/bot/captures/{cid}', {'status': 'archived'}, role='librarian')
 
     # Log to change log
-    summary_text = f"Librarian filed {filed_notes} captures ({filed_jobs} jobs, {filed_bills} bills, {filed_followups} followups)"
-    if not args.dry_run and filed_notes > 0:
+    summary_text = f"Librarian filed {filed_notes} actionable notes ({filed_jobs} jobs, {filed_bills} bills, {filed_followups} followups); archived {archived_non_actionables} non-actionables"
+    if not args.dry_run and (filed_notes > 0 or archived_non_actionables > 0):
         run_brain_cmd('POST', '/api/bot/changes', {
             'action': 'filing',
             'entity': 'captures',

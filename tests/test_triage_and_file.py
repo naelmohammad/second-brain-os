@@ -53,6 +53,18 @@ class TestTriageAndFile(unittest.TestCase):
         self.assertIn('severance', fu['title'].lower())
         self.assertEqual(fu['status'], 'open')
 
+    def test_promos_rejected_by_all_extractors(self):
+        promo_captures = [
+            {'title': 'STARTS NOW ✨ Buy One, Get One Freeπ on Select Styles', 'why': 'Store discount', 'raw': 'Shop now for clearance deals'},
+            {'title': 'Find your favorite Nano-Air', 'why': 'Patagonia deals', 'raw': 'Free shipping on orders over $99'},
+            {'title': '10 new jobs matching your profile', 'why': 'LinkedIn job digest', 'raw': 'Daily job alert'},
+            {'title': '(Correction) The Post Most: Nearly a tenth of the S&P 500 is tied to three men', 'why': 'Washington Post Newsletter', 'raw': 'Unsubscribe from daily digest'}
+        ]
+        for cap in promo_captures:
+            self.assertIsNone(triage_and_file.extract_job(cap), f"Job extractor should reject promo: {cap['title']}")
+            self.assertIsNone(triage_and_file.extract_bill(cap), f"Bill extractor should reject promo: {cap['title']}")
+            self.assertIsNone(triage_and_file.extract_followup(cap), f"Followup extractor should reject promo: {cap['title']}")
+
 
 if __name__ == '__main__':
     unittest.main()

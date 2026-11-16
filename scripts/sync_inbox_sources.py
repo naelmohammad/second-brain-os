@@ -6,7 +6,9 @@ Ingests emails across user accounts:
 - naelmohammad@hotmail.com (Microsoft Graph / Outlook IMAP)
 - naelm@yahoo.com (Yahoo IMAP)
 
-Classifies, deduplicates, and creates Second Brain captures via brain.sh.
+High-Value Actionable Intake:
+Filters strictly for actionable items (bills, interview/job requests, explicit action-needed followups).
+Discards all promotions, newsletters, advertisements, retail deals, and mass digests.
 """
 
 from __future__ import annotations
@@ -28,46 +30,158 @@ BRAIN_SH = os.path.join(HOME, 'second-brain', 'brain.sh')
 GWS_SCRIPT = os.path.join(HOME, '.hermes', 'skills', 'productivity', 'google-workspace', 'scripts', 'google_api.py')
 GWS_VENV_PYTHON = os.path.join(HOME, '.hermes', 'environments', 'google-workspace', 'gen-6206d2ffc46044ddae6a6ce5f5d336cf', 'venv', 'bin', 'python')
 
-# --- Classification Rules ---
-RE_JOB = re.compile(r'\b(interview|interviews|recruiter|recruiting|offer|hiring|headhunter|application|applied|screening|technical panel|onsite|candidate)\b', re.I)
-RE_BILL = re.compile(r'\b(bill|invoice|statement|due date|payment due|autopay|automatic payment|receipt|escrow|renewal|subscription)\b', re.I)
-RE_FOLLOWUP = re.compile(r'\b(deadline|action required|urgent|please reply|time-sensitive|reminder|asap|review and sign|rsvp|check-in)\b', re.I)
-RE_PROMO_SPAM = re.compile(r'\b(unsub|unsubscribe|opt out|promo|sale|discount|deal of the day|newsletter|marketing)\b', re.I)
+# --- High-Value Actionable Classification Rules ---
+
+# Strict promotional, sales, marketing, and newsletter signals to reject
+RE_PROMO_DISCARD = re.compile(
+    r'\b('
+    # Store sales & deals
+    r'sale|sales|discount|discounts|deal|deals|coupon|coupons|promo|promos|promotions?|pre-orders?|starts now|'
+    r'black friday|cyber monday|buy one|bogo|clearance|off your next|% off|free shipping|'
+    r'free gift|gift guide|rewards|cashback|cash back|shop now|view collection|new arrivals|'
+    r'holiday gift|limited time|order now|special offer|exclusive offer|'
+    # Newsletters, blogs, and media blasts
+    r'newsletter|daily digest|weekly digest|weekly roundup|edition|the post most|morning brew|'
+    r'tldr|substack|breaking news|special report|podcast|episode|webinar|sponsored|press release|'
+    # Job digests & automated board notifications (not individual recruiters)
+    r'jobs matching your profile|jobs you may be interested in|new jobs alert|daily job alert|'
+    r'weekly job roundup|recommended jobs|glassdoor jobs|indeed job alert|linkedin job alerts|'
+    # System notifications that are purely informational
+    r'scheduled maintenance|maintenance window|planned downtime|system maintenance|outage report'
+    r')\b',
+    re.I
+)
+
+# Unsubscribe / marketing headers or body signals
+RE_MARKETING_SIGNALS = re.compile(
+    r'\b(unsubscribe|opt out|manage preferences|view in browser|email preferences|privacy policy|forward to a friend)\b',
+    re.I
+)
+
+# Actionable: Job Interview or Recruitment (direct human recruiter / application status)
+RE_JOB_ACTIONABLE = re.compile(
+    r'\b('
+    r'invitation to interview|schedule an interview|interview request|interview with|'
+    r'screening call|technical screen|technical panel|onsite interview|virtual interview|'
+    r'next steps in your application|status of your application|job offer|offer letter|'
+    r'recruiter reached out|recruiting coordinator'
+    r')\b',
+    re.I
+)
+
+# Actionable: Bills & Invoices (requires genuine bill, payment notice, or invoice)
+RE_BILL_ACTIONABLE = re.compile(
+    r'\b('
+    r'bill due|invoice|payment due|statement is ready|autopay scheduled|automatic payment scheduled|'
+    r'amount due|minimum payment due|property tax|utility bill|billing statement|past due|'
+    r'payment confirmation|payment processed|tax notice'
+    r')\b',
+    re.I
+)
+
+# Actionable: Direct Action Required / Follow-up / Signature
+RE_FOLLOWUP_ACTIONABLE = re.compile(
+    r'\b('
+    r'action required|action needed|please reply|please respond|response required|'
+    r'time-sensitive|urgent response|rsvp requested|confirm your attendance|'
+    r'review and sign|signature requested|document awaiting signature|'
+    r'unauthorized login|security alert: new login|suspicious sign-in'
+    r')\b',
+    re.I
+)
 
 
 def classify_email(msg: Dict[str, Any]) -> Dict[str, Any]:
-    subject = msg.get('subject', '') or ''
-    from_addr = msg.get('from', '') or ''
-    snippet = msg.get('snippet', '') or ''
-    body = msg.get('body', '') or ''
+    """
+    Evaluates an email for high-value actionability.
+    Returns is_actionable=True ONLY if the email is a confirmed bill,
+    recruiter/interview action item, or direct follow-up request.
+    All ads, promos, retail deals, newsletters, and general blasts return is_actionable=False.
+    """
+    subject = (msg.get('subject') or '').strip()
+    from_addr = (msg.get('from') or '').strip()
+    snippet = (msg.get('snippet') or '').strip()
+    body = (msg.get('body') or '').strip()
     combined = f"{subject} {from_addr} {snippet} {body}".lower()
 
-    # Default category & urgency
-    category = 'general'
-    urgency = 'normal'
-    why = 'General correspondence'
+    # Step 1: Immediate check for high-confidence promotional/marketing discard
+    is_promo_match = bool(RE_PROMO_DISCARD.search(combined))
+    has_unsubscribe = bool(RE_MARKETING_SIGNALS.search(combined))
 
-    if RE_JOB.search(combined):
-        category = 'job'
-        urgency = 'high' if re.search(r'\b(interview|offer|onsite|screening|today|tomorrow)\b', combined, re.I) else 'normal'
-        why = f"Job lead or recruitment update: {subject}"
-    elif RE_BILL.search(combined):
-        category = 'bill'
-        urgency = 'high' if re.search(r'\b(due|past due|overdue|penalty)\b', combined, re.I) else 'normal'
-        why = f"Financial statement or billing item: {subject}"
-    elif RE_FOLLOWUP.search(combined):
-        category = 'followup'
-        urgency = 'urgent' if re.search(r'\b(asap|today|deadline|urgent|action required)\b', combined, re.I) else 'high'
-        why = f"Time-sensitive action or deadline: {subject}"
-    elif RE_PROMO_SPAM.search(combined) and not re.search(r'\b(receipt|order confirmation|shipped)\b', combined, re.I):
-        category = 'promo'
-        urgency = 'low'
-        why = 'Promotional or marketing message'
+    # Step 2: Check for actionable categories
+    is_bill = bool(RE_BILL_ACTIONABLE.search(combined))
+    is_job = bool(RE_JOB_ACTIONABLE.search(combined)) and not re.search(r'\b(jobs matching|alert|digest|recommended)\b', combined, re.I)
+    is_followup = bool(RE_FOLLOWUP_ACTIONABLE.search(combined))
 
+    # If it matched marketing/promo and is NOT a bill or direct job interview, discard immediately
+    if is_promo_match:
+        if not is_bill and not is_job:
+            return {
+                'is_actionable': False,
+                'category': 'promo',
+                'urgency': 'low',
+                'why': f"Promotional or marketing message discarded: {subject}",
+                'subject': subject,
+                'from': from_addr
+            }
+
+    # Step 3: Classify into actionable categories
+    if is_job:
+        return {
+            'is_actionable': True,
+            'category': 'job',
+            'urgency': 'high' if re.search(r'\b(today|tomorrow|urgent|schedule)\b', combined, re.I) else 'normal',
+            'why': f"Recruitment / Interview action item: {subject}",
+            'subject': subject,
+            'from': from_addr
+        }
+
+    if is_bill:
+        # Extra check: make sure it's not a store sale claiming 'bill'
+        if re.search(r'\b(sale|shop|discount|buy|cart)\b', combined, re.I) and not re.search(r'(\$\s*[0-9]+|amount|payment|invoice)', combined, re.I):
+            return {
+                'is_actionable': False,
+                'category': 'promo',
+                'urgency': 'low',
+                'why': f"Store promotion discarded: {subject}",
+                'subject': subject,
+                'from': from_addr
+            }
+        return {
+            'is_actionable': True,
+            'category': 'bill',
+            'urgency': 'high' if re.search(r'\b(past due|due today|overdue|penalty)\b', combined, re.I) else 'normal',
+            'why': f"Financial bill or payment notice: {subject}",
+            'subject': subject,
+            'from': from_addr
+        }
+
+    if is_followup:
+        # If it has marketing/unsubscribe signals, it's likely a newsletter claiming 'action required' or 'reminder'
+        if has_unsubscribe:
+            return {
+                'is_actionable': False,
+                'category': 'promo',
+                'urgency': 'low',
+                'why': f"Bulk marketing email discarded: {subject}",
+                'subject': subject,
+                'from': from_addr
+            }
+        return {
+            'is_actionable': True,
+            'category': 'followup',
+            'urgency': 'urgent' if re.search(r'\b(urgent|asap|today|unauthorized)\b', combined, re.I) else 'high',
+            'why': f"Action required / Time-sensitive request: {subject}",
+            'subject': subject,
+            'from': from_addr
+        }
+
+    # Everything else (newsletters, receipts, random correspondence, informational alerts) is DISCARDED
     return {
-        'category': category,
-        'urgency': urgency,
-        'why': why,
+        'is_actionable': False,
+        'category': 'ignored',
+        'urgency': 'low',
+        'why': f"Non-actionable message discarded: {subject}",
         'subject': subject,
         'from': from_addr
     }
@@ -119,117 +233,142 @@ def fetch_google_workspace_messages(max_results: int = 50) -> List[Dict[str, Any
             })
         return messages
     except Exception as e:
-        print(f"[WARN] Error fetching from Google Workspace: {e}", file=sys.stderr)
+        print(f"[WARN] Failed to fetch Google Workspace messages: {e}", file=sys.stderr)
         return []
 
 
-def get_keychain_password(account: str, service: str = "Hermes") -> Optional[str]:
-    """Safely fetch password or token from macOS Keychain."""
+def resolve_keychain_password(account: str, service: str = 'Hermes') -> Optional[str]:
     try:
-        val = subprocess.check_output(
+        res = subprocess.run(
             ['/usr/bin/security', 'find-generic-password', '-a', account, '-s', service, '-w'],
-            stderr=subprocess.DEVNULL
-        ).decode().strip()
-        return val if val else None
+            capture_output=True, text=True, timeout=5
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
     except Exception:
-        try:
-            val = subprocess.check_output(
-                ['/usr/bin/security', 'find-internet-password', '-a', account, '-w'],
-                stderr=subprocess.DEVNULL
-            ).decode().strip()
-            return val if val else None
-        except Exception:
-            return None
+        pass
+    return None
 
 
-def fetch_hotmail_messages(max_results: int = 20) -> List[Dict[str, Any]]:
-    """Fetch recent messages from Outlook / Hotmail (naelmohammad@hotmail.com)."""
-    pwd = get_keychain_password('naelmohammad@hotmail.com') or os.environ.get('HOTMAIL_PASSWORD')
-    if not pwd:
-        # Check if Graph token cache is readable or report auth pending
+def fetch_hotmail_messages(max_results: int = 50) -> List[Dict[str, Any]]:
+    """Fetch from Outlook/Hotmail IMAP (outlook.office365.com)."""
+    user = 'naelmohammad@hotmail.com'
+    password = os.environ.get('HOTMAIL_PASSWORD') or resolve_keychain_password('HOTMAIL_PASSWORD')
+    if not password:
         return []
 
+    messages = []
     try:
-        mail = imaplib.IMAP4_SSL('outlook.office365.com', 993, timeout=10)
-        mail.login('naelmohammad@hotmail.com', pwd)
+        mail = imaplib.IMAP4_SSL('outlook.office365.com', 993)
+        mail.login(user, password)
         mail.select('INBOX', readonly=True)
-        _, data = mail.search(None, '(UNSEEN)')
-        msg_ids = data[0].split()[-max_results:] if data and data[0] else []
-        messages = []
-        for mid in msg_ids:
-            _, mdata = mail.fetch(mid, '(RFC822)')
-            if mdata and mdata[0]:
-                raw_email = mdata[0][1]
-                parsed = BytesParser(policy=policy.default).parsebytes(raw_email)
-                messages.append({
-                    'source': 'hotmail',
-                    'account': 'naelmohammad@hotmail.com',
-                    'id': f"hotmail-{mid.decode()}",
-                    'from': parsed.get('From', ''),
-                    'to': parsed.get('To', ''),
-                    'subject': parsed.get('Subject', ''),
-                    'date': parsed.get('Date', ''),
-                    'snippet': parsed.get_body(preferencelist=('plain', 'html')).get_content()[:200] if parsed.get_body() else ''
-                })
+        _, data = mail.search(None, 'UNSEEN')
+        id_list = data[0].split()
+        if not id_list:
+            _, data = mail.search(None, 'ALL')
+            id_list = data[0].split()[-max_results:]
+        else:
+            id_list = id_list[-max_results:]
+
+        for num in id_list:
+            _, msg_data = mail.fetch(num, '(RFC822)')
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    msg = BytesParser(policy=policy.default).parsebytes(response_part[1])
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == 'text/plain':
+                                body = part.get_content()
+                                break
+                    else:
+                        body = msg.get_content()
+
+                    messages.append({
+                        'source': 'hotmail',
+                        'account': user,
+                        'id': f"hm_{num.decode()}",
+                        'from': msg['from'],
+                        'to': msg['to'],
+                        'subject': msg['subject'],
+                        'date': msg['date'],
+                        'snippet': body[:200] if body else '',
+                        'body': body[:1000] if body else ''
+                    })
         mail.close()
         mail.logout()
-        return messages
     except Exception as e:
-        print(f"[INFO] Hotmail ingestion status: {e}", file=sys.stderr)
+        print(f"[WARN] Hotmail IMAP fetch failed: {e}", file=sys.stderr)
+    return messages
+
+
+def fetch_yahoo_messages(max_results: int = 50) -> List[Dict[str, Any]]:
+    """Fetch from Yahoo IMAP (export.imap.mail.yahoo.com)."""
+    user = 'naelm@yahoo.com'
+    password = os.environ.get('YAHOO_APP_PASSWORD') or resolve_keychain_password('YAHOO_APP_PASSWORD')
+    if not password:
         return []
 
-
-def fetch_yahoo_messages(max_results: int = 20) -> List[Dict[str, Any]]:
-    """Fetch recent messages from Yahoo (naelm@yahoo.com)."""
-    pwd = get_keychain_password('naelm@yahoo.com') or get_keychain_password('YAHOO_APP_PASSWORD') or os.environ.get('YAHOO_APP_PASSWORD')
-    if not pwd:
-        return []
-
+    messages = []
     try:
-        mail = imaplib.IMAP4_SSL('imap.mail.yahoo.com', 993, timeout=10)
-        mail.login('naelm@yahoo.com', pwd)
+        mail = imaplib.IMAP4_SSL('export.imap.mail.yahoo.com', 993)
+        mail.login(user, password)
         mail.select('INBOX', readonly=True)
-        _, data = mail.search(None, '(UNSEEN)')
-        msg_ids = data[0].split()[-max_results:] if data and data[0] else []
-        messages = []
-        for mid in msg_ids:
-            _, mdata = mail.fetch(mid, '(RFC822)')
-            if mdata and mdata[0]:
-                raw_email = mdata[0][1]
-                parsed = BytesParser(policy=policy.default).parsebytes(raw_email)
-                messages.append({
-                    'source': 'yahoo',
-                    'account': 'naelm@yahoo.com',
-                    'id': f"yahoo-{mid.decode()}",
-                    'from': parsed.get('From', ''),
-                    'to': parsed.get('To', ''),
-                    'subject': parsed.get('Subject', ''),
-                    'date': parsed.get('Date', ''),
-                    'snippet': parsed.get_body(preferencelist=('plain', 'html')).get_content()[:200] if parsed.get_body() else ''
-                })
+        _, data = mail.search(None, 'UNSEEN')
+        id_list = data[0].split()
+        if not id_list:
+            _, data = mail.search(None, 'ALL')
+            id_list = data[0].split()[-max_results:]
+        else:
+            id_list = id_list[-max_results:]
+
+        for num in id_list:
+            _, msg_data = mail.fetch(num, '(RFC822)')
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    msg = BytesParser(policy=policy.default).parsebytes(response_part[1])
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == 'text/plain':
+                                body = part.get_content()
+                                break
+                    else:
+                        body = msg.get_content()
+
+                    messages.append({
+                        'source': 'yahoo',
+                        'account': user,
+                        'id': f"yh_{num.decode()}",
+                        'from': msg['from'],
+                        'to': msg['to'],
+                        'subject': msg['subject'],
+                        'date': msg['date'],
+                        'snippet': body[:200] if body else '',
+                        'body': body[:1000] if body else ''
+                    })
         mail.close()
         mail.logout()
-        return messages
     except Exception as e:
-        print(f"[INFO] Yahoo IMAP status: {e}", file=sys.stderr)
-        return []
+        print(f"[WARN] Yahoo IMAP fetch failed: {e}", file=sys.stderr)
+    return messages
 
-
-# --- Second Brain Sync via brain.sh ---
 
 def get_existing_captures() -> set[str]:
-    """Retrieve existing capture titles and source URLs from Second Brain."""
-    seen = set()
+    """Retrieve existing capture source_urls and titles to prevent re-capturing."""
     if not os.path.exists(BRAIN_SH):
-        return seen
+        return set()
+    cmd = [BRAIN_SH, 'GET', '/api/bot/captures', '', 'scout']
+    seen = set()
     try:
-        out = subprocess.check_output([BRAIN_SH, 'GET', '/api/bot/captures'], stderr=subprocess.DEVNULL, timeout=10)
-        captures = json.loads(out)
-        for c in captures:
-            if c.get('source_url'):
-                seen.add(c['source_url'].strip().lower())
-            if c.get('title'):
-                seen.add(c['title'].strip().lower())
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if res.returncode == 0 and res.stdout.strip():
+            captures = json.loads(res.stdout)
+            for c in captures:
+                if c.get('source_url'):
+                    seen.add(c['source_url'].strip().lower())
+                if c.get('title'):
+                    seen.add(c['title'].strip().lower())
     except Exception as e:
         print(f"[WARN] Could not retrieve existing captures: {e}", file=sys.stderr)
     return seen
@@ -289,17 +428,19 @@ def main():
     existing_captures = get_existing_captures()
     actionable_count = 0
     posted_count = 0
+    discarded_count = 0
 
     for msg in unique_msgs:
         classification = classify_email(msg)
-        cat = classification['category']
-        if cat == 'promo':
+        if not classification.get('is_actionable'):
+            discarded_count += 1
             continue
 
         subj = msg.get('subject', 'Untitled Email').strip()
         from_hdr = msg.get('from', '')
         source_url = f"email://{msg.get('source', 'mail')}/{msg.get('id', '')}"
-        
+        cat = classification['category']
+
         # Check duplicate
         if source_url.lower() in existing_captures or subj.lower() in existing_captures:
             continue
@@ -321,6 +462,7 @@ def main():
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'scanned': len(unique_msgs),
         'actionable': actionable_count,
+        'discarded_non_actionable': discarded_count,
         'posted': posted_count,
         'dry_run': args.dry_run
     }
