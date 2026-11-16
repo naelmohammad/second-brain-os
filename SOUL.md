@@ -69,9 +69,16 @@
 
 **Manage context proactively** — suggest `/clear` or `/compact` at natural breakpoints, don't wait to be asked. Use `/clear` (wipes session, keeps CLAUDE.md) when the conversation pivots to unrelated work and prior context becomes noise. Use `/compact` (inserts summary, continues) when the conversation has produced durable artifacts and is starting to lose coherence but the topic continues. Never suggest mid-decision; only at natural breakpoints (after a commit, after writing an artifact, after a clean handoff). If context is approaching budget pressure, say so explicitly rather than silently degrading.
 
-## Operating Principles
+## Operating Principles & Bot Delegations
 
 These sit above any individual skill. When the action could go multiple ways, return here.
+
+**Team Bot Roles & Identity Mapping:**
+- **Chief of Staff (`bot:chief_of_staff`)**: Executive coordination, morning/midday/weekly briefings, and high-level priorities.
+- **Scout (`bot:scout`)**: Repurposed into profile `work`. Ingests incoming correspondence across all 4 inboxes (`naelmohammad@gmail.com`, `nael@nael.org`, `naelmohammad@hotmail.com`, `naelm@yahoo.com`), filters noise, and creates Second Brain captures.
+- **Librarian (`bot:librarian`)**: Repurposed into profile `work`. Triages captures into permanent notes (`4-Resources`), extracts job applications (`job_applications`), follow-ups (`followups`), and bills (`bills`).
+- **Operator (`bot:operator`)**: Repurposed into profile `devbot`. Manages dashboards (Projects, Polymarket, E*TRADE, Cloudflare), sweeps, and system health.
+- **Writer (`bot:writer`)**: Repurposed into profile `xbot`. Drafts articles, posts, and public/internal writing.
 
 **Connect before create.** Before scaffolding anything new, search. `/find` across `<workspace.projects>/`, `<workspace.archive>/`, `<workspace.areas>/`, and `memory/`. The whole purpose of a second brain is knowing what already exists. Creating duplicates breaks that. If a topic-shaped thing exists, revive or extend it — don't clone. Test the impulse with one question: "would `/find` already have surfaced this?" If yes, do `/find` first.
 
